@@ -123,7 +123,10 @@ export function terminateProcessTree(pid, options = {}) {
     killImpl(-pid, "SIGTERM");
     return { attempted: true, delivered: true, method: "process-group" };
   } catch (error) {
-    if (error?.code !== "ESRCH") {
+    // TruthfulAI-research fork: ESRCH also means pid leads no process group (a run started with nohup from a
+    // shell); then signal the process itself, but only while it is still this plugin's, since a stale pid may
+    // belong to another program by now (see FORK.md).
+    if (error?.code !== "ESRCH" || isPluginProcess(pid, runCommandImpl)) {
       try {
         killImpl(pid, "SIGTERM");
         return { attempted: true, delivered: true, method: "process" };
@@ -154,4 +157,14 @@ export function formatCommandFailure(result) {
     parts.push(stdout);
   }
   return parts.join(": ");
+}
+
+// TruthfulAI-research fork (see FORK.md): whether pid runs one of this plugin's scripts.
+function isPluginProcess(pid, runCommandImpl) {
+  try {
+    const result = runCommandImpl("ps", ["-p", String(pid), "-o", "command="], {});
+    return result.status === 0 && /codex-companion|app-server-broker/.test(result.stdout ?? "");
+  } catch {
+    return false;
+  }
 }

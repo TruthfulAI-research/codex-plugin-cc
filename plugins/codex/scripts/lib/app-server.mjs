@@ -15,6 +15,8 @@ import readline from "node:readline";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { ensureBrokerSession, loadBrokerSession } from "./broker-lifecycle.mjs";
 import { terminateProcessTree } from "./process.mjs";
+// TruthfulAI-research fork: see FORK.md.
+import { threadConfigEnabled } from "./fork-thread-config.mjs";
 
 const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
 const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
@@ -203,6 +205,9 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
     this.proc = spawn("codex", ["app-server"], {
       cwd: this.cwd,
       env: this.options.env ?? process.env,
+      // TruthfulAI-research fork: its own process group, so that `cancel` signaling the run's group reaches only
+      // the run, which then stops its turn and the processes below the app-server (see FORK.md).
+      detached: threadConfigEnabled(),
       stdio: ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32" ? (process.env.SHELL || true) : false,
       windowsHide: true
@@ -348,7 +353,8 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
 export class CodexAppServerClient {
   static async connect(cwd, options = {}) {
     let brokerEndpoint = null;
-    if (!options.disableBroker) {
+    // TruthfulAI-research fork: a run with a caller-chosen sandbox never uses a shared broker.
+    if (!options.disableBroker && !threadConfigEnabled()) {
       brokerEndpoint = options.brokerEndpoint ?? options.env?.[BROKER_ENDPOINT_ENV] ?? process.env[BROKER_ENDPOINT_ENV] ?? null;
       if (!brokerEndpoint && options.reuseExistingBroker) {
         brokerEndpoint = loadBrokerSession(cwd)?.endpoint ?? null;

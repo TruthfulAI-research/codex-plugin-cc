@@ -41,6 +41,8 @@ import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from 
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
 import { binaryAvailable, isPidAlive } from "./process.mjs";
+// TruthfulAI-research fork: see FORK.md.
+import { applyThreadConfig, checkPermissionProfile, interruptTurnOnSignal } from "./fork-thread-config.mjs";
 
 const SERVICE_NAME = "claude_code_codex_plugin";
 const TASK_THREAD_PREFIX = "Codex Companion Task";
@@ -57,25 +59,25 @@ function cleanCodexStderr(stderr) {
 
 /** @returns {ThreadStartParams} */
 function buildThreadParams(cwd, options = {}) {
-  return {
+  return applyThreadConfig({
     cwd,
     model: options.model ?? null,
     approvalPolicy: options.approvalPolicy ?? "never",
     sandbox: options.sandbox ?? "read-only",
     serviceName: SERVICE_NAME,
     ephemeral: options.ephemeral ?? true
-  };
+  }, options);
 }
 
 /** @returns {ThreadResumeParams} */
 function buildResumeParams(threadId, cwd, options = {}) {
-  return {
+  return applyThreadConfig({
     threadId,
     cwd,
     model: options.model ?? null,
     approvalPolicy: options.approvalPolicy ?? "never",
     sandbox: options.sandbox ?? "read-only"
-  };
+  }, options);
 }
 
 /** @returns {UserInput[]} */
@@ -646,6 +648,7 @@ async function withAppServer(cwd, fn, connectOptions = {}) {
 
 async function startThread(client, cwd, options = {}) {
   const response = await client.request("thread/start", buildThreadParams(cwd, options));
+  checkPermissionProfile(response, options);
   const threadId = response.thread.id;
   if (options.threadName) {
     try {
@@ -663,7 +666,9 @@ async function startThread(client, cwd, options = {}) {
 }
 
 async function resumeThread(client, threadId, cwd, options = {}) {
-  return client.request("thread/resume", buildResumeParams(threadId, cwd, options));
+  const response = await client.request("thread/resume", buildResumeParams(threadId, cwd, options));
+  checkPermissionProfile(response, options);
+  return response;
 }
 
 function buildResultStatus(turnState) {
@@ -995,6 +1000,8 @@ export async function runAppServerReview(cwd, options = {}) {
     });
     const delivery = options.delivery ?? "inline";
 
+    // TruthfulAI-research fork: see FORK.md.
+    const signalInterrupt = interruptTurnOnSignal(client, sourceThreadId);
     const turnState = await captureTurn(
       client,
       sourceThreadId,
@@ -1013,9 +1020,10 @@ export async function runAppServerReview(cwd, options = {}) {
               state.threadId = response.reviewThreadId;
             }
           }
+          signalInterrupt.onResponse?.(response, state);
         }
       }
-    );
+    ).finally(() => signalInterrupt.remove());
 
     return {
       status: buildResultStatus(turnState),
@@ -1069,6 +1077,8 @@ export async function runAppServerTurn(cwd, options = {}) {
       throw new Error("A prompt is required for this Codex run.");
     }
 
+    // TruthfulAI-research fork: see FORK.md.
+    const signalInterrupt = interruptTurnOnSignal(client, threadId);
     const turnState = await captureTurn(
       client,
       threadId,
@@ -1080,8 +1090,8 @@ export async function runAppServerTurn(cwd, options = {}) {
           effort: options.effort ?? null,
           outputSchema: options.outputSchema ?? null
         }),
-      { onProgress: options.onProgress }
-    );
+      { onProgress: options.onProgress, onResponse: signalInterrupt.onResponse }
+    ).finally(() => signalInterrupt.remove());
 
     return {
       status: buildResultStatus(turnState),

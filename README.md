@@ -1,5 +1,7 @@
 # Codex plugin for Claude Code
 
+> **TruthfulAI-research's fork** (see [FORK.md](FORK.md)): install it with `claude plugin marketplace add TruthfulAI-research/codex-plugin-cc` and `claude plugin install codex@codex-plugin-cc`. The rest of this README is upstream's.
+
 AI models from different providers tend to have uncorrelated failure modes, making cross-model review effective at catching issues that self-review misses. Many users have found Codex particularly effective at reviewing Claude's work. This plugin connects them: Claude can delegate tasks to Codex, run adversarial reviews on code and plans, and iterate on the feedback autonomously.
 
 This is a fork of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) with a focus on giving Claude and the user more control over when and how Codex is invoked, through composable hooks and a simpler CLI interface.
