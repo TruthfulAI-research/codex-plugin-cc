@@ -166,7 +166,7 @@ else
 fi
 
 if [ "$dry_run" = 1 ]; then
-  echo "Dry run: would push $state_branch ($(wc -l < "$work/seen.tsv" | tr -d ' ') rows in seen.tsv, last_checked $now)."
+  echo "Dry run: would push $state_branch (last_checked $now)."
 else
   git push -q origin "$state_commit:refs/heads/$state_branch"
   echo "Pushed $state_branch (last_checked $now)."
