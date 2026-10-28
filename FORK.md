@@ -17,7 +17,7 @@ This repository is a fork of [Crazytieguy/codex-plugin-cc](https://github.com/Cr
    - a run stops before its first turn when the thread's active permission profile is not the entry's `default_permissions`;
    - invalid JSON or a missing entry stops the run; it never falls back to the old settings.
 
-   - `cancel` signals the run's process (a shared broker would otherwise take the interrupt), and the run then interrupts its own turn, so Codex stops the turn's commands, before it exits. For a run that leads no process group (started with `nohup` from a shell), the kill helper in `lib/process.mjs` now signals the process itself, where upstream gave up.
+   - `cancel` (for tasks and the plugin's plain `review`) signals the run's process (a shared broker would otherwise take the interrupt), and the run then interrupts its own turn, so Codex stops the turn's commands, before it exits. For a run that leads no process group (started with `nohup` from a shell), the kill helper in `lib/process.mjs` now signals the process itself, where upstream gave up.
 
    Without the variable, the plugin behaves as upstream, apart from that kill-helper fix. The code is `plugins/codex/scripts/lib/fork-thread-config.mjs`, called from three places in `codex.mjs` and one in `app-server.mjs`; the tests are `tests/fork-thread-config.test.mjs`.
 

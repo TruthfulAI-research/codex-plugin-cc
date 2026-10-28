@@ -82,8 +82,10 @@ export function interruptTurnOnSignal(client, threadId, env = process.env, proc 
   proc.once("SIGTERM", handler);
   proc.once("SIGINT", handler);
   return {
-    onResponse: (response) => {
+    // captureTurn passes its state; a review delivered to a new thread runs its turn there.
+    onResponse: (response, state) => {
       turnId = response?.turn?.id ?? null;
+      threadId = state?.threadId ?? threadId;
     },
     remove() {
       proc.off("SIGTERM", handler);

@@ -185,3 +185,17 @@ test("without the variable no signal handler is installed", () => {
   assert.equal(interrupt.onResponse, undefined);
   interrupt.remove();
 });
+
+test("a review delivered to its own thread interrupts the turn on that thread", async () => {
+  const requests = [];
+  const handlers = new Map();
+  let exited;
+  const done = new Promise((resolve) => (exited = resolve));
+  const client = { request: async (method, params) => requests.push([method, params]), close: async () => {} };
+  const proc = { once: (signal, fn) => handlers.set(signal, fn), off: (signal) => handlers.delete(signal), exit: () => exited() };
+  const interrupt = interruptTurnOnSignal(client, "source-thread", { [THREAD_CONFIG_ENV]: CONFIG }, proc);
+  interrupt.onResponse({ turn: { id: "turn-9" } }, { threadId: "review-thread" });
+  handlers.get("SIGTERM")("SIGTERM");
+  await done;
+  assert.deepEqual(requests, [["turn/interrupt", { threadId: "review-thread", turnId: "turn-9" }]]);
+});

@@ -1000,6 +1000,8 @@ export async function runAppServerReview(cwd, options = {}) {
     });
     const delivery = options.delivery ?? "inline";
 
+    // TruthfulAI-research fork: see FORK.md.
+    const signalInterrupt = interruptTurnOnSignal(client, sourceThreadId);
     const turnState = await captureTurn(
       client,
       sourceThreadId,
@@ -1018,9 +1020,10 @@ export async function runAppServerReview(cwd, options = {}) {
               state.threadId = response.reviewThreadId;
             }
           }
+          signalInterrupt.onResponse?.(response, state);
         }
       }
-    );
+    ).finally(() => signalInterrupt.remove());
 
     return {
       status: buildResultStatus(turnState),
