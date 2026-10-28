@@ -41,6 +41,8 @@ import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from 
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
 import { binaryAvailable, isPidAlive } from "./process.mjs";
+// TruthfulAI-research fork: see FORK.md.
+import { applyThreadConfig, checkPermissionProfile } from "./fork-thread-config.mjs";
 
 const SERVICE_NAME = "claude_code_codex_plugin";
 const TASK_THREAD_PREFIX = "Codex Companion Task";
@@ -57,25 +59,25 @@ function cleanCodexStderr(stderr) {
 
 /** @returns {ThreadStartParams} */
 function buildThreadParams(cwd, options = {}) {
-  return {
+  return applyThreadConfig({
     cwd,
     model: options.model ?? null,
     approvalPolicy: options.approvalPolicy ?? "never",
     sandbox: options.sandbox ?? "read-only",
     serviceName: SERVICE_NAME,
     ephemeral: options.ephemeral ?? true
-  };
+  }, options);
 }
 
 /** @returns {ThreadResumeParams} */
 function buildResumeParams(threadId, cwd, options = {}) {
-  return {
+  return applyThreadConfig({
     threadId,
     cwd,
     model: options.model ?? null,
     approvalPolicy: options.approvalPolicy ?? "never",
     sandbox: options.sandbox ?? "read-only"
-  };
+  }, options);
 }
 
 /** @returns {UserInput[]} */
@@ -646,6 +648,7 @@ async function withAppServer(cwd, fn, connectOptions = {}) {
 
 async function startThread(client, cwd, options = {}) {
   const response = await client.request("thread/start", buildThreadParams(cwd, options));
+  checkPermissionProfile(response, options);
   const threadId = response.thread.id;
   if (options.threadName) {
     try {
@@ -663,7 +666,9 @@ async function startThread(client, cwd, options = {}) {
 }
 
 async function resumeThread(client, threadId, cwd, options = {}) {
-  return client.request("thread/resume", buildResumeParams(threadId, cwd, options));
+  const response = await client.request("thread/resume", buildResumeParams(threadId, cwd, options));
+  checkPermissionProfile(response, options);
+  return response;
 }
 
 function buildResultStatus(turnState) {
