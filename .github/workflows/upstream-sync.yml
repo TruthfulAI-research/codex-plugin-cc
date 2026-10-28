@@ -1,0 +1,53 @@
+name: Upstream sync
+
+# Merges upstream's main (Crazytieguy/codex-plugin-cc) into this fork's main, but only commits that
+# upstream's main has had for at least 7 days. See .github/upstream-sync/README.md.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Print what would happen and push nothing
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - .github/workflows/upstream-sync.yml
+      - .github/upstream-sync/**
+      - .gitattributes
+
+permissions:
+  contents: write
+
+concurrency:
+  # One real run at a time; pull request runs are dry runs and queue on their own.
+  group: upstream-sync-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Plain git instead of actions/checkout, so the job runs no third-party code.
+      - name: Fetch this commit's sync scripts
+        env:
+          REPO_URL: https://github.com/${{ github.repository }}.git
+        run: |
+          git init -q -b src "$RUNNER_TEMP/src"
+          git -C "$RUNNER_TEMP/src" fetch -q --no-tags --depth=1 "$REPO_URL" "$GITHUB_SHA"
+          git -C "$RUNNER_TEMP/src" checkout -q --detach FETCH_HEAD
+
+      - name: Test the sync scripts
+        if: github.event_name == 'pull_request'
+        run: bash "$RUNNER_TEMP/src/.github/upstream-sync/test.sh"
+
+      - name: Sync
+        env:
+          SYNC_DRY_RUN: ${{ (github.event_name == 'pull_request' || inputs.dry_run) && '1' || '0' }}
+          # Dry runs push nothing, so they get no token for pushing.
+          SYNC_TOKEN: ${{ !(github.event_name == 'pull_request' || inputs.dry_run) && github.token || '' }}
+          # Only for reading GitHub's activity log of upstream.
+          SYNC_API_TOKEN: ${{ github.token }}
+        run: bash "$RUNNER_TEMP/src/.github/upstream-sync/sync.sh"

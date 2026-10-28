@@ -1,0 +1,4 @@
+# The plugin manifests are merged with the driver "fork-manifest", which the upstream sync job
+# configures: the result is upstream's file without the version fields (.github/upstream-sync/README.md).
+plugins/codex/.claude-plugin/plugin.json merge=fork-manifest
+.claude-plugin/marketplace.json merge=fork-manifest
