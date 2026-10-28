@@ -6,16 +6,20 @@
 #   SYNC_DRY_RUN=1     do everything locally, push nothing, print what would happen
 #   SYNC_TOKEN         token for pushing to the fork over HTTPS (the job's GITHUB_TOKEN)
 #   SYNC_NOW           the current time, as 2026-10-28T17:00:00Z (tests)
+#   SYNC_API_TOKEN     token for reading GitHub's activity log of upstream (read only)
 #   SYNC_ORIGIN_URL    the fork (default: this GitHub repository)
 #   SYNC_UPSTREAM_URL  upstream (default: Crazytieguy/codex-plugin-cc)
+#   SYNC_ACTIVITY_URL  GitHub's activity log of upstream (tests use a file:// URL)
 set -euo pipefail
 export LC_ALL=C
 
 here=$(cd "$(dirname "$0")" && pwd)
 origin_url=${SYNC_ORIGIN_URL:-https://github.com/${GITHUB_REPOSITORY:-TruthfulAI-research/codex-plugin-cc}.git}
 upstream_url=${SYNC_UPSTREAM_URL:-https://github.com/Crazytieguy/codex-plugin-cc.git}
+activity_url=${SYNC_ACTIVITY_URL:-https://api.github.com/repos/Crazytieguy/codex-plugin-cc/activity}
 state_branch=upstream-sync-state
-min_age_seconds=$((7 * 24 * 60 * 60))
+min_age_days=7
+stall_days=30
 manifests="plugins/codex/.claude-plugin/plugin.json .claude-plugin/marketplace.json"
 tab=$(printf '\t')
 time_re='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
@@ -36,7 +40,9 @@ esac
 now=${SYNC_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 [[ $now =~ $time_re ]] || die "SYNC_NOW must look like 2026-10-28T17:00:00Z, not $now"
 # Times in this format compare correctly as strings.
-cutoff=$(jq -nr --arg now "$now" --argjson age "$min_age_seconds" '$now | fromdateiso8601 - $age | todate')
+days_before() { jq -nr --arg now "$now" --argjson days "$1" '$now | fromdateiso8601 - $days * 86400 | todate'; }
+cutoff=$(days_before "$min_age_days")
+stall_cutoff=$(days_before "$stall_days")
 
 work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/upstream-sync.XXXXXX")
 trap 'rm -rf "$work"' EXIT
@@ -89,6 +95,9 @@ else
   echo "Upstream main is at $head, a new head as of now ($now)."
 fi
 
+if [ -s "$work/seen.tsv" ] && [ -n "$(tail -c 1 "$work/seen.tsv")" ]; then
+  die "seen.tsv on $state_branch does not end with a newline"
+fi
 if grep -Evq "^[0-9a-f]{40}${tab}[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\$" "$work/seen.tsv"; then
   die "seen.tsv on $state_branch has a malformed line"
 fi
@@ -101,6 +110,15 @@ while IFS="$tab" read -r sha time; do
   shas+=("$sha")
   times+=("$time")
 done < "$work/seen.tsv"
+
+# Commits that this fork merged and that upstream's main no longer has: upstream removed them after
+# the 7 days, which may mean that they were bad.
+removed=$(for sha in "${shas[@]}"; do
+  if git merge-base --is-ancestor "$sha" refs/remotes/origin/main 2> /dev/null &&
+    ! git merge-base --is-ancestor "$sha" refs/remotes/upstream/main 2> /dev/null; then
+    echo "$sha"
+  fi
+done | sort -u)
 
 # stayed <row>: whether the row's commit is an ancestor of every later row's commit, that is, stayed
 # in upstream's history without a break since that row. A later commit that is no longer on upstream
@@ -125,51 +143,112 @@ for ((i = ${#shas[@]} - 1; i >= 0; i--)); do
   echo "Skipping ${shas[$i]} (on upstream main at ${times[$i]}): not every later head is known to contain it."
 done
 
-merged=0 conflict=0
-if [ -z "$candidate" ]; then
-  echo "No commit has been on upstream main for 7 days without a break (since $cutoff or earlier): nothing to merge."
+# rewrites_since <time>: prints the force-pushes and deletions of upstream's main after <time> that
+# GitHub's activity log shows. A removal and restore between two runs leaves no trace in seen.tsv.
+# Fails when the log cannot be read.
+rewrites_since() {
+  local type
+  for type in force_push branch_deletion; do
+    if [ -n "${SYNC_API_TOKEN:-}" ]; then printf 'Authorization: Bearer %s\n' "$SYNC_API_TOKEN"; fi |
+      curl -fsS --max-time 60 -H @- -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+        "$activity_url?ref=refs/heads/main&activity_type=$type&direction=desc&per_page=100" > "$work/activity-$type.json" ||
+      return 1
+  done
+  # The newest 100 of each type, newest first, are enough: one after <time> is all it takes.
+  jq -nr --arg since "$1" '
+    [inputs | if type == "array" then .[] else error("the activity log is not a list") end
+      | select(.ref == "refs/heads/main" and (.activity_type == "force_push" or .activity_type == "branch_deletion"))
+      | if (.timestamp | type) == "string" and (.timestamp | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) then .
+        else error("an activity has no valid timestamp") end
+      | select(.timestamp > $since) | "\(.timestamp) \(.activity_type)"]
+    | unique[]' "$work/activity-force_push.json" "$work/activity-branch_deletion.json"
+}
+
+merged=0 failure='' outcome=''
+if [ -n "$removed" ]; then
+  echo "Upstream's main no longer has these commits, which this fork's main has merged:"
+  echo "$removed"
+  failure="upstream removed from its main commits that this fork merged ($(printf '%s' "$removed" | tr '\n' ' ')); they may be bad. Nothing was merged. See .github/upstream-sync/README.md."
+elif [ -z "$candidate" ]; then
+  outcome="no commit has been on upstream main for 7 days without a break."
+  echo "Nothing to merge: $outcome"
 elif git merge-base --is-ancestor "$candidate" refs/remotes/origin/main; then
-  echo "$candidate (on upstream main since $candidate_seen) is already in main: nothing to merge."
+  outcome="the newest commit that has been on upstream main for 7 days without a break, $candidate, is already in main."
+  echo "Nothing to merge: $outcome"
+elif ! rewrites=$(rewrites_since "$candidate_seen"); then
+  failure="could not read GitHub's activity log of upstream's main; nothing was merged."
+elif [ -n "$rewrites" ]; then
+  outcome="upstream's main was force-pushed or deleted after $candidate_seen, when $candidate was logged."
+  echo "Nothing to merge: $outcome"
+  echo "$rewrites"
+  echo "A head logged after that can be merged once it has been on upstream main for 7 days."
+  # If the head is still the last row's commit, log it again, so that it counts from now.
+  latest=${rewrites##*$'\n'}
+  if [[ ${latest%% *} > ${times[${#times[@]} - 1]} ]]; then
+    printf '%s\t%s\n' "$head" "$now" >> "$work/seen.tsv"
+    echo "Logged upstream's head $head again, as of now."
+  fi
 else
-  echo "Merging $candidate (on upstream main since $candidate_seen). Upstream commits it brings:"
-  git log --oneline --no-decorate "refs/remotes/origin/main..$candidate"
-  git checkout -q --detach refs/remotes/origin/main
-  if git merge -q --no-ff --no-commit "$candidate"; then
-    # The merge driver runs only where both sides changed a manifest. This also deletes version
-    # fields that only upstream added or changed.
-    for path in $manifests; do
-      if [ -f "$path" ]; then
-        bash "$here/fork-manifest.sh" "$path" "$work/manifest" "$path"
-        if ! cmp -s "$work/manifest" "$path"; then
-          cp "$work/manifest" "$path"
-          git add "$path"
-          echo "Deleted the version fields in $path."
-        fi
-      fi
-    done
-    {
-      echo "Merge upstream commit ${candidate:0:12}"
-      echo
-      echo "Upstream: $upstream_url"
-      echo "Commit: $candidate"
-      echo "On upstream main since: $candidate_seen"
-      echo
-      echo "Merged by the upstream sync job, which merges an upstream commit only once it has"
-      echo "been on upstream main for 7 days (.github/upstream-sync/README.md)."
-    } > "$work/message"
-    git commit -q --no-verify -F "$work/message"
-    merged=1
+  # Upstream must never change this job (its scripts, workflow or merge driver), so commits that touch
+  # .github/ or .gitattributes, including modes and symlinks, are merged only by hand.
+  protected=$(git log --format='%h %s' --full-history "refs/remotes/origin/main..$candidate" -- .github .gitattributes)
+  if [ -n "$protected" ]; then
+    echo "These upstream commits change .github/ or .gitattributes, which the job never merges:"
+    echo "$protected"
+    failure="upstream commit $candidate changes .github/ or .gitattributes; main was not changed. Merge by hand from a machine whose token may push workflow files: see .github/upstream-sync/README.md."
   else
-    conflict=1
-    echo "The merge conflicts in:"
-    git diff --name-only --diff-filter=U
+    echo "Merging $candidate (on upstream main since $candidate_seen). Upstream commits it brings:"
+    git log --oneline --no-decorate "refs/remotes/origin/main..$candidate"
+    git checkout -q --detach refs/remotes/origin/main
+    if ! git merge -q --no-ff --no-commit "$candidate"; then
+      echo "The merge conflicts in:"
+      git diff --name-only --diff-filter=U
+      failure="merging upstream commit $candidate into main conflicts; main was not changed. Merge by hand: see .github/upstream-sync/README.md."
+    elif ! git diff --cached --quiet refs/remotes/origin/main -- .github .gitattributes; then
+      # A second check on the result, in case the history check above missed a path.
+      failure="merging upstream commit $candidate would change .github/ or .gitattributes; main was not changed. Merge by hand from a machine whose token may push workflow files: see .github/upstream-sync/README.md."
+    else
+      # The merge driver runs only where both sides changed a manifest. This also deletes version
+      # fields that only upstream added or changed.
+      for path in $manifests; do
+        if [ -f "$path" ]; then
+          bash "$here/fork-manifest.sh" "$path" "$work/manifest" "$path"
+          if ! cmp -s "$work/manifest" "$path"; then
+            cp "$work/manifest" "$path"
+            git add "$path"
+            echo "Deleted the version fields in $path."
+          fi
+        fi
+      done
+      {
+        echo "Merge upstream commit ${candidate:0:12}"
+        echo
+        echo "Upstream: $upstream_url"
+        echo "Commit: $candidate"
+        echo "On upstream main since: $candidate_seen"
+        echo
+        echo "Merged by the upstream sync job, which merges an upstream commit only once it has"
+        echo "been on upstream main for 7 days (.github/upstream-sync/README.md)."
+      } > "$work/message"
+      git commit -q --no-verify -F "$work/message"
+      merged=1
+      outcome="merged $candidate."
+    fi
   fi
 fi
 
-workflow_commits=''
-if [ "$merged" = 1 ]; then
-  workflow_commits=$(git log --format='%h %s' --full-history refs/remotes/origin/main..HEAD -- .github/workflows)
-fi
+# A stall: upstream's main has had a commit for 30 days that main still lacks.
+synced=refs/remotes/origin/main
+if [ "$merged" = 1 ]; then synced=HEAD; fi
+stall=''
+for ((i = 0; i < ${#shas[@]}; i++)); do
+  if [[ ${times[$i]} > $stall_cutoff ]]; then break; fi
+  if git merge-base --is-ancestor "${shas[$i]}" refs/remotes/upstream/main 2> /dev/null &&
+    ! git merge-base --is-ancestor "${shas[$i]}" "$synced"; then
+    stall="the job has not been able to merge upstream commit ${shas[$i]}, logged at ${times[$i]}, for $stall_days days. This run: $outcome See .github/upstream-sync/README.md."
+    break
+  fi
+done
 
 printf '%s\n' "$now" > "$work/last_checked"
 seen_blob=$(git hash-object -w "$work/seen.tsv")
@@ -189,21 +268,18 @@ else
   echo "Pushed $state_branch (last_checked $now)."
 fi
 
-if [ "$conflict" = 1 ]; then
-  die "merging upstream commit $candidate into main conflicts; main was not changed. Merge by hand: see .github/upstream-sync/README.md."
+if [ -n "$failure" ]; then
+  die "$failure"
 fi
 if [ "$merged" = 1 ]; then
-  if [ -n "$workflow_commits" ]; then
-    echo "These upstream commits change .github/workflows/, which the job's token may not push:"
-    echo "$workflow_commits"
-  fi
   if [ "$dry_run" = 1 ]; then
     echo "Dry run: would push main as $(git log -1 --format='%h %s')."
   elif git push -q origin HEAD:refs/heads/main; then
     echo "Pushed main: $(git log -1 --format='%h %s')."
-  elif [ -n "$workflow_commits" ]; then
-    die "pushing main failed: upstream changed .github/workflows/, which the job's token may not push; main was not changed. Merge by hand from the laptop: see .github/upstream-sync/README.md."
   else
     die "pushing main failed; main was not changed."
   fi
+fi
+if [ -n "$stall" ]; then
+  die "$stall"
 fi

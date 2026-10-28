@@ -46,6 +46,8 @@ jobs:
       - name: Sync
         env:
           SYNC_DRY_RUN: ${{ (github.event_name == 'pull_request' || inputs.dry_run) && '1' || '0' }}
-          # Dry runs push nothing, so they get no token.
+          # Dry runs push nothing, so they get no token for pushing.
           SYNC_TOKEN: ${{ !(github.event_name == 'pull_request' || inputs.dry_run) && github.token || '' }}
+          # Only for reading GitHub's activity log of upstream.
+          SYNC_API_TOKEN: ${{ github.token }}
         run: bash "$RUNNER_TEMP/src/.github/upstream-sync/sync.sh"
