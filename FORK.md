@@ -23,6 +23,6 @@ This repository is a fork of [Crazytieguy/codex-plugin-cc](https://github.com/Cr
 
 2. **No `version` in `plugins/codex/.claude-plugin/plugin.json`.** Claude Code installs a plugin update only when the version string changes, and uses the marketplace's git commit when there is none. Without the field, each commit of this fork installs as its own version, so switching from upstream and taking upstream's merges both reach installed copies. (`npm run check-version` reports the missing field; upstream's CI does not run it.)
 
-3. **Upstream's changes arrive through a daily job, after 7 days.** `.github/workflows/upstream-sync.yml` merges upstream's `main` into this `main`, but only commits it first saw at least 7 days earlier, as a defense against supply-chain attacks: every machine that installs this plugin updates itself from `main`. See `.github/upstream-sync/README.md`.
+3. **Upstream's changes arrive through a daily job, after 7 days.** `.github/workflows/upstream-sync.yml` merges into this `main` the newest upstream commit that has been in upstream's `main` for at least 7 days, as npm's `min-release-age` does for packages: a defense against supply-chain attacks, since every machine that installs this plugin updates itself from `main`. A commit upstream removes is never merged; one it only reverts is merged once 7 days old. Upstream changes to `.github/` or `.gitattributes` are never merged automatically. See `.github/upstream-sync/README.md`.
 
 Changed files carry a comment saying so, as the Apache License 2.0 (section 4(b)) asks.
