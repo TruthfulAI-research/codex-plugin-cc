@@ -12,7 +12,7 @@ This repository is a fork of [Crazytieguy/codex-plugin-cc](https://github.com/Cr
    ```
 
    Each entry is sent as thread/start's (and thread/resume's) `config`: keys are split on dots, so absolute paths go inside values. With the variable set:
-   - every run starts its own `codex app-server` in the run's folder, with the caller's environment; no broker is shared;
+   - every run starts its own `codex app-server` in the run's folder, with the caller's environment and in its own process group; no broker is shared;
    - `cwd` is not sent, because Codex marks a cwd that the sandbox can write as a trusted project in its config.toml (the app-server's own folder is used instead);
    - a run stops before its first turn when the thread's active permission profile is not the entry's `default_permissions`;
    - invalid JSON or a missing entry stops the run; it never falls back to the old settings.

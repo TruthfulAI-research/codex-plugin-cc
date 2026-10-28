@@ -205,6 +205,9 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
     this.proc = spawn("codex", ["app-server"], {
       cwd: this.cwd,
       env: this.options.env ?? process.env,
+      // TruthfulAI-research fork: its own process group, so that `cancel` signaling the run's group reaches only
+      // the run, which then stops its turn and the processes below the app-server (see FORK.md).
+      detached: threadConfigEnabled(),
       stdio: ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32" ? (process.env.SHELL || true) : false,
       windowsHide: true
