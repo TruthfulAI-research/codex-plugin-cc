@@ -13,6 +13,7 @@ import {
   THREAD_CONFIG_ENV,
   applyThreadConfig,
   checkPermissionProfile,
+  descendantPids,
   interruptTurnOnSignal,
   threadConfigFor
 } from "../plugins/codex/scripts/lib/fork-thread-config.mjs";
@@ -140,10 +141,23 @@ test("cancel reaches a run that leads no process group: the process itself is si
       throw Object.assign(new Error("no such process group"), { code: "ESRCH" });
     }
   };
-  const outcome = terminateProcessTree(4321, { platform: "linux", killImpl });
+  const runCommandImpl = () => ({ status: 0, stdout: "node /x/scripts/codex-companion.mjs task go\n" });
+  const outcome = terminateProcessTree(4321, { platform: "linux", killImpl, runCommandImpl });
   assert.deepEqual(calls, [[-4321, "SIGTERM"], [4321, "SIGTERM"]]);
   assert.equal(outcome.delivered, true);
   assert.equal(outcome.method, "process");
+});
+
+test("a stale pid that now belongs to another program is not signaled", () => {
+  const calls = [];
+  const killImpl = (pid, signal) => {
+    calls.push([pid, signal]);
+    throw Object.assign(new Error("no such process group"), { code: "ESRCH" });
+  };
+  const runCommandImpl = () => ({ status: 0, stdout: "/usr/bin/vim notes.txt\n" });
+  const outcome = terminateProcessTree(4321, { platform: "linux", killImpl, runCommandImpl });
+  assert.deepEqual(calls, [[-4321, "SIGTERM"]]);
+  assert.equal(outcome.delivered, false);
 });
 
 test("on SIGTERM a run interrupts its own turn, closes the app-server and exits", async () => {
@@ -155,26 +169,37 @@ test("on SIGTERM a run interrupts its own turn, closes the app-server and exits"
       closed = true;
     }
   };
+  client.proc = { pid: 100 };
   const handlers = new Map();
+  const killed = [];
   let exitCode = null;
   let exited;
   const done = new Promise((resolve) => (exited = resolve));
   const proc = {
     once: (signal, fn) => handlers.set(signal, fn),
     off: (signal) => handlers.delete(signal),
+    kill: (pid, signal) => killed.push([pid, signal]),
     exit: (code) => {
       exitCode = code;
       exited();
     }
   };
   const env = { [THREAD_CONFIG_ENV]: CONFIG };
-  const interrupt = interruptTurnOnSignal(client, "thread-1", env, proc);
+  const ps = () => ({ status: 0, stdout: "  100     1\n  200   100\n  300   200\n  400     1\n" });
+  const interrupt = interruptTurnOnSignal(client, "thread-1", env, proc, ps);
   interrupt.onResponse({ turn: { id: "turn-7" } });
   handlers.get("SIGTERM")("SIGTERM");
   await done;
   assert.deepEqual(requests, [["turn/interrupt", { threadId: "thread-1", turnId: "turn-7" }]]);
+  assert.deepEqual(killed, [[300, "SIGKILL"], [200, "SIGKILL"]]);
   assert.equal(closed, true);
   assert.equal(exitCode, 143);
+});
+
+test("descendantPids lists every process below a pid, deepest first", () => {
+  const ps = () => ({ status: 0, stdout: "1 0\n10 1\n11 10\n12 11\n13 10\n20 1\n" });
+  assert.deepEqual(descendantPids(10, ps), [12, 11, 13]);
+  assert.deepEqual(descendantPids(Number.NaN, ps), []);
 });
 
 test("without the variable no signal handler is installed", () => {
@@ -192,8 +217,8 @@ test("a review delivered to its own thread interrupts the turn on that thread", 
   let exited;
   const done = new Promise((resolve) => (exited = resolve));
   const client = { request: async (method, params) => requests.push([method, params]), close: async () => {} };
-  const proc = { once: (signal, fn) => handlers.set(signal, fn), off: (signal) => handlers.delete(signal), exit: () => exited() };
-  const interrupt = interruptTurnOnSignal(client, "source-thread", { [THREAD_CONFIG_ENV]: CONFIG }, proc);
+  const proc = { once: (signal, fn) => handlers.set(signal, fn), off: (signal) => handlers.delete(signal), kill: () => {}, exit: () => exited() };
+  const interrupt = interruptTurnOnSignal(client, "source-thread", { [THREAD_CONFIG_ENV]: CONFIG }, proc, () => ({ status: 1 }));
   interrupt.onResponse({ turn: { id: "turn-9" } }, { threadId: "review-thread" });
   handlers.get("SIGTERM")("SIGTERM");
   await done;
