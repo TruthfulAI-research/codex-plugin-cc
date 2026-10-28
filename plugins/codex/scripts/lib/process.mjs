@@ -123,7 +123,9 @@ export function terminateProcessTree(pid, options = {}) {
     killImpl(-pid, "SIGTERM");
     return { attempted: true, delivered: true, method: "process-group" };
   } catch (error) {
-    if (error?.code !== "ESRCH") {
+    // TruthfulAI-research fork: ESRCH also means pid leads no process group (a run started with nohup from a
+    // shell), so signal the process itself then too (see FORK.md).
+    {
       try {
         killImpl(pid, "SIGTERM");
         return { attempted: true, delivered: true, method: "process" };

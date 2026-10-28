@@ -7,7 +7,9 @@
 // every run starts its own `codex app-server` (no shared broker, so it runs with the caller's environment),
 // and a run whose active permission profile is not the entry's `default_permissions` is stopped before
 // its first turn. `cwd` is left out because Codex marks a cwd that the sandbox can write as a trusted
-// project in its config.toml; the app-server runs in cwd, which Codex then uses.
+// project in its config.toml; the app-server runs in cwd, which Codex then uses. Without a broker, `cancel`
+// cannot reach a run's app-server, so it signals the run's process (lib/process.mjs), which then interrupts its
+// own turn, so that Codex stops the turn's commands, before it exits.
 
 export const THREAD_CONFIG_ENV = "CODEX_COMPANION_THREAD_CONFIG";
 
@@ -55,4 +57,37 @@ export function checkPermissionProfile(response, options = {}, env = process.env
       `Codex did not apply the permission profile "${wanted}" (active: ${active ?? "none"}), so the run was stopped before it started.`
     );
   }
+}
+
+// Installs, for a run with the variable set, a SIGTERM/SIGINT handler that interrupts this thread's turn and
+// closes the app-server before the process exits. Pass `onResponse` to captureTurn; call `remove` afterwards.
+export function interruptTurnOnSignal(client, threadId, env = process.env, proc = process) {
+  if (!threadConfigEnabled(env)) {
+    return { onResponse: undefined, remove() {} };
+  }
+  let turnId = null;
+  const handler = (signal) => {
+    const exit = () => proc.exit(signal === "SIGINT" ? 130 : 143);
+    const timer = setTimeout(exit, 5000);
+    const interrupt = turnId ? client.request("turn/interrupt", { threadId, turnId }) : Promise.resolve();
+    interrupt
+      .catch(() => {})
+      .then(() => client.close())
+      .catch(() => {})
+      .finally(() => {
+        clearTimeout(timer);
+        exit();
+      });
+  };
+  proc.once("SIGTERM", handler);
+  proc.once("SIGINT", handler);
+  return {
+    onResponse: (response) => {
+      turnId = response?.turn?.id ?? null;
+    },
+    remove() {
+      proc.off("SIGTERM", handler);
+      proc.off("SIGINT", handler);
+    }
+  };
 }

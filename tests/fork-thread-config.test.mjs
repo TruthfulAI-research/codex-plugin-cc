@@ -8,10 +8,12 @@ import { fileURLToPath } from "node:url";
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import { loadBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import { terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
 import {
   THREAD_CONFIG_ENV,
   applyThreadConfig,
   checkPermissionProfile,
+  interruptTurnOnSignal,
   threadConfigFor
 } from "../plugins/codex/scripts/lib/fork-thread-config.mjs";
 
@@ -128,4 +130,58 @@ test("a run whose active profile differs is stopped", () => {
   });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr + result.stdout, /did not apply the permission profile "research-read"/);
+});
+
+test("cancel reaches a run that leads no process group: the process itself is signaled", () => {
+  const calls = [];
+  const killImpl = (pid, signal) => {
+    calls.push([pid, signal]);
+    if (pid < 0) {
+      throw Object.assign(new Error("no such process group"), { code: "ESRCH" });
+    }
+  };
+  const outcome = terminateProcessTree(4321, { platform: "linux", killImpl });
+  assert.deepEqual(calls, [[-4321, "SIGTERM"], [4321, "SIGTERM"]]);
+  assert.equal(outcome.delivered, true);
+  assert.equal(outcome.method, "process");
+});
+
+test("on SIGTERM a run interrupts its own turn, closes the app-server and exits", async () => {
+  const requests = [];
+  let closed = false;
+  const client = {
+    request: async (method, params) => requests.push([method, params]),
+    close: async () => {
+      closed = true;
+    }
+  };
+  const handlers = new Map();
+  let exitCode = null;
+  let exited;
+  const done = new Promise((resolve) => (exited = resolve));
+  const proc = {
+    once: (signal, fn) => handlers.set(signal, fn),
+    off: (signal) => handlers.delete(signal),
+    exit: (code) => {
+      exitCode = code;
+      exited();
+    }
+  };
+  const env = { [THREAD_CONFIG_ENV]: CONFIG };
+  const interrupt = interruptTurnOnSignal(client, "thread-1", env, proc);
+  interrupt.onResponse({ turn: { id: "turn-7" } });
+  handlers.get("SIGTERM")("SIGTERM");
+  await done;
+  assert.deepEqual(requests, [["turn/interrupt", { threadId: "thread-1", turnId: "turn-7" }]]);
+  assert.equal(closed, true);
+  assert.equal(exitCode, 143);
+});
+
+test("without the variable no signal handler is installed", () => {
+  const handlers = new Map();
+  const proc = { once: (signal, fn) => handlers.set(signal, fn), off: () => {}, exit: () => {} };
+  const interrupt = interruptTurnOnSignal({}, "thread-1", {}, proc);
+  assert.equal(handlers.size, 0);
+  assert.equal(interrupt.onResponse, undefined);
+  interrupt.remove();
 });

@@ -42,7 +42,7 @@ import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
 import { binaryAvailable, isPidAlive } from "./process.mjs";
 // TruthfulAI-research fork: see FORK.md.
-import { applyThreadConfig, checkPermissionProfile } from "./fork-thread-config.mjs";
+import { applyThreadConfig, checkPermissionProfile, interruptTurnOnSignal } from "./fork-thread-config.mjs";
 
 const SERVICE_NAME = "claude_code_codex_plugin";
 const TASK_THREAD_PREFIX = "Codex Companion Task";
@@ -1074,6 +1074,8 @@ export async function runAppServerTurn(cwd, options = {}) {
       throw new Error("A prompt is required for this Codex run.");
     }
 
+    // TruthfulAI-research fork: see FORK.md.
+    const signalInterrupt = interruptTurnOnSignal(client, threadId);
     const turnState = await captureTurn(
       client,
       threadId,
@@ -1085,8 +1087,8 @@ export async function runAppServerTurn(cwd, options = {}) {
           effort: options.effort ?? null,
           outputSchema: options.outputSchema ?? null
         }),
-      { onProgress: options.onProgress }
-    );
+      { onProgress: options.onProgress, onResponse: signalInterrupt.onResponse }
+    ).finally(() => signalInterrupt.remove());
 
     return {
       status: buildResultStatus(turnState),

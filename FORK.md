@@ -17,7 +17,9 @@ This repository is a fork of [Crazytieguy/codex-plugin-cc](https://github.com/Cr
    - a run stops before its first turn when the thread's active permission profile is not the entry's `default_permissions`;
    - invalid JSON or a missing entry stops the run; it never falls back to the old settings.
 
-   Without the variable, the plugin behaves as upstream. The code is `plugins/codex/scripts/lib/fork-thread-config.mjs`, called from two places in `codex.mjs` and one in `app-server.mjs`; the tests are `tests/fork-thread-config.test.mjs`.
+   - `cancel` signals the run's process (a shared broker would otherwise take the interrupt), and the run then interrupts its own turn, so Codex stops the turn's commands, before it exits. For a run that leads no process group (started with `nohup` from a shell), the kill helper in `lib/process.mjs` now signals the process itself, where upstream gave up.
+
+   Without the variable, the plugin behaves as upstream, apart from that kill-helper fix. The code is `plugins/codex/scripts/lib/fork-thread-config.mjs`, called from three places in `codex.mjs` and one in `app-server.mjs`; the tests are `tests/fork-thread-config.test.mjs`.
 
 2. **No `version` in `plugins/codex/.claude-plugin/plugin.json`.** Claude Code installs a plugin update only when the version string changes, and uses the marketplace's git commit when there is none. Without the field, each commit of this fork installs as its own version, so switching from upstream and taking upstream's merges both reach installed copies. (`npm run check-version` reports the missing field; upstream's CI does not run it.)
 
