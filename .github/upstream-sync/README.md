@@ -1,16 +1,20 @@
 # Upstream sync
 
-This fork takes the changes of its upstream, [Crazytieguy/codex-plugin-cc](https://github.com/Crazytieguy/codex-plugin-cc), automatically, but only once they are at least 7 days old. The delay is a defense against supply-chain attacks: every machine that installs the plugin updates itself from this fork's `main`, so a malicious commit pushed to upstream should have a week to be noticed and removed before it gets here.
+This fork takes the changes of its upstream, [Crazytieguy/codex-plugin-cc](https://github.com/Crazytieguy/codex-plugin-cc), automatically, but only once they are at least 7 days old. The delay is a defense against supply-chain attacks: every machine that installs the plugin updates itself from this fork's `main`, so a malicious commit pushed to upstream should have a week to be noticed and removed before it gets here. The rule is the one package managers use for a minimum release age, such as npm's `min-release-age` or uv's `exclude-newer`: take the newest version that upstream has had for at least 7 days.
 
 ## What the job does
 
 The workflow `.github/workflows/upstream-sync.yml` runs `sync.sh` once a day. Each run:
 
-1. Fetches upstream's `main`, this fork's `main`, and the branch `upstream-sync-state`. That branch holds `seen.tsv`, one line per upstream head the job has seen (the full commit hash and the time the job first saw it, in UTC), and `last_checked`, the time of the last run. The first run creates the branch.
-2. Adds upstream's current head to `seen.tsv` if it is not there yet.
-3. Picks the newest commit in `seen.tsv` that was first seen at least 7 days ago and is still on upstream's `main`. Commit dates play no part, since anyone can backdate them. A commit that a force-push removed from upstream is skipped.
-4. If that commit is not yet in `main`, merges it into `main` with a merge commit that names it and the time it was first seen.
-5. Pushes `upstream-sync-state`, on every run, then `main` if it merged something. The daily push is also meant to keep the repository active: GitHub turns off scheduled workflows in a public repository after 60 days without activity.
+1. Fetches upstream's `main`, this fork's `main`, and the branch `upstream-sync-state`. That branch holds `seen.tsv`, a log of upstream's head with one row per change (the full commit hash and the time the job saw it, in UTC), and `last_checked`, the time of the last run. The first run creates the branch.
+2. Adds a row to `seen.tsv` when upstream's head differs from the last row's commit, even if that commit is in an earlier row.
+3. Picks the newest row that is at least 7 days old and whose commit has stayed in upstream's history since: it is an ancestor of every later row's commit, the last of which is upstream's current head. Commit dates play no part, since anyone can backdate them.
+4. If that commit is not yet in `main`, merges it into `main` with a merge commit that names it and the time of its row.
+5. Pushes `upstream-sync-state`, on every run, then `main` if it merged something.
+
+So a commit that a force-push removes from upstream within the 7 days is never merged, and a commit that comes back later counts only from its new row.
+
+What the rule does not cover: a bad commit that upstream reverts instead of removing still reaches this fork's `main` 7 days after it appeared on upstream, and the revert follows 7 days after it appeared. Packages behave the same way: a bad version that is replaced by a newer one, but not withdrawn, is still installed once it is old enough.
 
 The job uses only `git` and `jq`: no third-party actions, and no upstream code is run.
 
@@ -19,6 +23,14 @@ The job uses only `git` and `jq`: no third-party actions, and no upstream code i
 Claude Code updates a plugin only when its version changes. Without a `version` field it uses the git commit, so each new commit of this fork counts as an update. The fork therefore keeps `version` deleted in `plugins/codex/.claude-plugin/plugin.json` and in the plugin entries of `.claude-plugin/marketplace.json`, while upstream changes the version in most commits.
 
 `.gitattributes` gives both files the merge driver `fork-manifest` (`fork-manifest.sh`), which `sync.sh` configures: where both sides changed the file, the result is upstream's file without the version fields. After each merge, `sync.sh` also deletes version fields that only upstream changed. Any other change this fork makes to these two files is replaced by upstream's next change to them.
+
+## When the job stops running
+
+GitHub turns off scheduled workflows in a public repository after 60 days without activity. The daily push to `upstream-sync-state` may count as activity; GitHub does not say. If GitHub turns the schedule off after a quiet spell, it sends an email, the fork stays on the last upstream commit it merged, and this turns the schedule back on:
+
+```sh
+gh workflow enable upstream-sync.yml -R TruthfulAI-research/codex-plugin-cc
+```
 
 ## When the job fails
 

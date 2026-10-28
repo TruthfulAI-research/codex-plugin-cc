@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Merges upstream's main into this fork's main, but only commits first seen on upstream main at least
-# 7 days ago. See README.md in this folder.
+# Merges upstream's main into this fork's main, but only commits that upstream's main has had for at
+# least 7 days, like a package manager's minimum release age. See README.md in this folder.
 #
 # Environment (all optional):
 #   SYNC_DRY_RUN=1     do everything locally, push nothing, print what would happen
@@ -78,43 +78,60 @@ case $status in
   *) die "could not list the branches of $origin_url" ;;
 esac
 
+# seen.tsv is a log of upstream's head: a row whenever the head differs from the last row's commit,
+# even if that commit is in an earlier row. So the last row is upstream's current head.
+head=$(git rev-parse refs/remotes/upstream/main)
+last_row=$(tail -n 1 "$work/seen.tsv")
+if [ "${last_row%%"$tab"*}" = "$head" ]; then
+  echo "Upstream main is at $head, its head since ${last_row#*"$tab"}."
+else
+  printf '%s\t%s\n' "$head" "$now" >> "$work/seen.tsv"
+  echo "Upstream main is at $head, a new head as of now ($now)."
+fi
+
 if grep -Evq "^[0-9a-f]{40}${tab}[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\$" "$work/seen.tsv"; then
   die "seen.tsv on $state_branch has a malformed line"
 fi
-duplicates=$(cut -f1 "$work/seen.tsv" | sort | uniq -d)
-if [ -n "$duplicates" ]; then
-  die "seen.tsv on $state_branch lists a commit twice"
+if ! awk -F "$tab" 'NR > 1 && $2 < previous { exit 1 } { previous = $2 }' "$work/seen.tsv"; then
+  die "seen.tsv on $state_branch is not in time order, or the clock is behind its last row"
 fi
 
-head=$(git rev-parse refs/remotes/upstream/main)
-head_seen=$(awk -F "$tab" -v head="$head" '$1 == head { print $2 }' "$work/seen.tsv")
-if [ -n "$head_seen" ]; then
-  echo "Upstream main is at $head, first seen $head_seen."
-else
-  printf '%s\t%s\n' "$head" "$now" >> "$work/seen.tsv"
-  echo "Upstream main is at $head, first seen now ($now)."
-fi
+shas=() times=()
+while IFS="$tab" read -r sha time; do
+  shas+=("$sha")
+  times+=("$time")
+done < "$work/seen.tsv"
 
-# The candidate: the newest commit first seen at least 7 days ago that is still on upstream main.
-# Commit dates are never used: an attacker can backdate them.
+# stayed <row>: whether the row's commit is an ancestor of every later row's commit, that is, stayed
+# in upstream's history without a break since that row. A later commit that is no longer on upstream
+# main is not fetched; it counts as a break.
+stayed() {
+  local j
+  for ((j = $1 + 1; j < ${#shas[@]}; j++)); do
+    git merge-base --is-ancestor "${shas[$1]}" "${shas[$j]}" 2> /dev/null || return 1
+  done
+}
+
+# The candidate: the newest row at least 7 days old whose commit stayed in upstream's history since.
+# A commit that left upstream's history and came back counts only from its new row. Commit dates
+# are never used: an attacker can backdate them.
 candidate='' candidate_seen=''
-sort -t "$tab" -k2,2r "$work/seen.tsv" > "$work/newest-first.tsv"
-while IFS="$tab" read -r sha first_seen; do
-  if [[ $first_seen > $cutoff ]]; then continue; fi
-  if git cat-file -e "$sha^{commit}" 2> /dev/null && git merge-base --is-ancestor "$sha" refs/remotes/upstream/main; then
-    candidate=$sha candidate_seen=$first_seen
+for ((i = ${#shas[@]} - 1; i >= 0; i--)); do
+  if [[ ${times[$i]} > $cutoff ]]; then continue; fi
+  if stayed "$i"; then
+    candidate=${shas[$i]} candidate_seen=${times[$i]}
     break
   fi
-  echo "Skipping $sha (first seen $first_seen): it is no longer on upstream main."
-done < "$work/newest-first.tsv"
+  echo "Skipping ${shas[$i]} (on upstream main at ${times[$i]}): not every later head is known to contain it."
+done
 
 merged=0 conflict=0
 if [ -z "$candidate" ]; then
-  echo "No commit still on upstream main was first seen at least 7 days ago (by $cutoff): nothing to merge."
+  echo "No commit has been on upstream main for 7 days without a break (since $cutoff or earlier): nothing to merge."
 elif git merge-base --is-ancestor "$candidate" refs/remotes/origin/main; then
-  echo "$candidate (first seen $candidate_seen) is already in main: nothing to merge."
+  echo "$candidate (on upstream main since $candidate_seen) is already in main: nothing to merge."
 else
-  echo "Merging $candidate (first seen $candidate_seen). Upstream commits it brings:"
+  echo "Merging $candidate (on upstream main since $candidate_seen). Upstream commits it brings:"
   git log --oneline --no-decorate "refs/remotes/origin/main..$candidate"
   git checkout -q --detach refs/remotes/origin/main
   if git merge -q --no-ff --no-commit "$candidate"; then
@@ -135,10 +152,10 @@ else
       echo
       echo "Upstream: $upstream_url"
       echo "Commit: $candidate"
-      echo "First seen on upstream main: $candidate_seen"
+      echo "On upstream main since: $candidate_seen"
       echo
-      echo "Merged by the upstream sync job, which merges an upstream commit only 7 days after"
-      echo "it first appeared on upstream main (.github/upstream-sync/README.md)."
+      echo "Merged by the upstream sync job, which merges an upstream commit only once it has"
+      echo "been on upstream main for 7 days (.github/upstream-sync/README.md)."
     } > "$work/message"
     git commit -q --no-verify -F "$work/message"
     merged=1

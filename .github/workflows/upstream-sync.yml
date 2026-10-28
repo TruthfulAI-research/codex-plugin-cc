@@ -1,7 +1,7 @@
 name: Upstream sync
 
-# Merges upstream's main (Crazytieguy/codex-plugin-cc) into this fork's main, but only commits
-# first seen on upstream at least 7 days ago. See .github/upstream-sync/README.md.
+# Merges upstream's main (Crazytieguy/codex-plugin-cc) into this fork's main, but only commits that
+# upstream's main has had for at least 7 days. See .github/upstream-sync/README.md.
 
 on:
   schedule:

@@ -87,6 +87,15 @@ said() { grep -qF -- "$1" "$root/out"; }
 succeeded() { [ "$status" = 0 ]; }
 equal() { [ "$1" = "$2" ]; }
 
+# put_state <seen.tsv>: replaces seen.tsv on the state branch, as anyone with write access could.
+put_state() {
+  local blob tree
+  blob=$(printf '%s\n' "$1" | git -C "$fork" hash-object -w --stdin)
+  tree=$(printf '100644 blob %s\tseen.tsv\n' "$blob" | git -C "$fork" mktree)
+  edited_state=$(git -C "$fork" commit-tree "$tree" -p upstream-sync-state -m "edited state")
+  git -C "$fork" update-ref refs/heads/upstream-sync-state "$edited_state"
+}
+
 echo "# a missing state branch is created"
 setup
 u0=$(git -C "$up" rev-parse HEAD)
@@ -112,7 +121,8 @@ check "a run at 7 days succeeds" succeeded
 check "main's first parent is the old main" equal "$(git -C "$fork" rev-parse main^1)" "$main0"
 check "main's second parent is the upstream commit" equal "$(git -C "$fork" rev-parse main^2)" "$u1"
 check "the merge message names the commit" grep -qF "Commit: $u1" <(git -C "$fork" log -1 --format=%B main)
-check "the merge message says when it was first seen" grep -qF "First seen on upstream main: 2026-01-02T00:00:00Z" <(git -C "$fork" log -1 --format=%B main)
+check "the merge message says since when it was on upstream main" \
+  grep -qF "On upstream main since: 2026-01-02T00:00:00Z" <(git -C "$fork" log -1 --format=%B main)
 merged=$(main_head)
 run_sync 2026-01-10T00:00:00Z
 check "a later run succeeds" succeeded
@@ -131,6 +141,41 @@ run_sync 2026-01-08T00:00:00Z
 check "the run succeeds" succeeded
 check "the commit seen 7 days ago is in main" in_main "$u1"
 check "the commit seen 4 days ago is not" not in_main "$u2"
+
+echo "# a re-pushed commit counts only from its re-push"
+setup
+printf 'line 1\nm\n' > "$up/a.txt"
+m=$(up_commit "m")
+run_sync 2026-01-01T00:00:00Z
+git -C "$up" reset -q --hard HEAD~1
+printf 'line 1\nx\n' > "$up/a.txt"
+x=$(up_commit "x")
+run_sync 2026-01-02T00:00:00Z
+git -C "$up" reset -q --hard "$m"
+run_sync 2026-01-04T00:00:00Z
+check "seen.tsv logs the re-pushed commit again" equal "$(state_file seen.tsv | cut -f1 | tr '\n' ' ')" "$m $x $m "
+run_sync 2026-01-10T23:59:59Z
+check "a run 7 days after its first row succeeds" succeeded
+check "it skips the first row" said "Skipping $m (on upstream main at 2026-01-01T00:00:00Z)"
+check "it merges nothing" equal "$(main_head)" "$main0"
+run_sync 2026-01-11T00:00:00Z
+check "7 days after the re-push, the commit is merged" equal "$(git -C "$fork" rev-parse main^2)" "$m"
+check "the commit that replaced it for 2 days is not in main" not in_main "$x"
+
+echo "# a commit reverted within the week is still merged on day 7, as with packages"
+setup
+run_sync 2026-01-01T00:00:00Z
+printf 'line 1\nbad\n' > "$up/a.txt"
+m=$(up_commit "bad")
+run_sync 2026-01-02T00:00:00Z
+git -C "$up" revert --no-edit HEAD > /dev/null
+r=$(git -C "$up" rev-parse HEAD)
+run_sync 2026-01-03T00:00:00Z
+run_sync 2026-01-09T00:00:00Z
+check "the run on day 7 succeeds" succeeded
+check "it merges the reverted commit" equal "$(git -C "$fork" rev-parse main^2)" "$m"
+run_sync 2026-01-10T00:00:00Z
+check "the revert follows a day later" equal "$(git -C "$fork" rev-parse main^2)" "$r"
 
 echo "# an upstream version bump merges without a conflict and the version stays deleted"
 setup
@@ -219,14 +264,16 @@ check "the state branch is still updated" equal "$(state_file last_checked)" 202
 echo "# a malformed seen.tsv fails the job and pushes nothing"
 setup
 run_sync 2026-01-01T00:00:00Z
-blob=$(printf 'not a commit\t2026-01-01T00:00:00Z\n' | git -C "$fork" hash-object -w --stdin)
-tree=$(printf '100644 blob %s\tseen.tsv\n' "$blob" | git -C "$fork" mktree)
-bad_state=$(git -C "$fork" commit-tree "$tree" -p upstream-sync-state -m "bad state")
-git -C "$fork" update-ref refs/heads/upstream-sync-state "$bad_state"
-run_sync 2026-01-02T00:00:00Z
-check "the run fails" not succeeded
-check "it names the problem" said "malformed line"
-check "the state branch is unchanged" equal "$(git -C "$fork" rev-parse upstream-sync-state)" "$bad_state"
+u0=$(git -C "$up" rev-parse HEAD)
+for content in "not a commit${tab}2026-01-01T00:00:00Z" \
+  "$u0${tab}2026-01-03T00:00:00Z
+$u0${tab}2026-01-01T00:00:00Z"; do
+  put_state "$content"
+  run_sync 2026-01-04T00:00:00Z
+  check "the run fails" not succeeded
+  check "it names the problem" said "seen.tsv on upstream-sync-state"
+  check "the state branch is unchanged" equal "$(git -C "$fork" rev-parse upstream-sync-state)" "$edited_state"
+done
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures check(s) failed"
